@@ -25,7 +25,10 @@
 #include <aws/s3/S3Errors.h>
 #include <aws/core/utils/stream/PreallocatedStreamBuf.h>
 #include <aws/core/utils/memory/stl/AWSStringStream.h>
+#include <aws/core/client/DefaultRetryStrategy.h>
 #include <absl/strings/str_format.h>
+#include <algorithm>
+#include <cstdlib>
 
 awsS3Client::awsS3Client(nixl_b_params_t *custom_params,
                          std::shared_ptr<Aws::Utils::Threading::Executor> executor) {
@@ -34,23 +37,49 @@ awsS3Client::awsS3Client(nixl_b_params_t *custom_params,
 
     Aws::Client::ClientConfiguration config;
     nixl_s3_utils::configureClientCommon(config, custom_params);
-    if (executor) config.executor = executor;
+    if (executor) {
+        config.executor = executor;
+    }
+
+    // Robustness: bounded retry of TRANSIENT transfer failures. Under heavy concurrent load
+    // the ObjectScale endpoint can close a connection mid-transfer (curl 18 CURLE_PARTIAL_FILE,
+    // which the SDK classifies as a retryable NETWORK_CONNECTION error). GET (full-object or a
+    // fixed byte-range) and PUT here are idempotent, so retrying is safe and prevents a transient
+    // hiccup from surfacing to the caller as a hard NIXL_ERR_BACKEND. Overridable via the
+    // "max_retries" backend param (default 5). A DefaultRetryStrategy retries retryable errors
+    // (incl. network/connection) with exponential backoff.
+    long max_retries = 5;
+    if (custom_params) {
+        auto mr_it = custom_params->find("max_retries");
+        if (mr_it != custom_params->end()) {
+            try {
+                max_retries = std::max(0L, std::stol(mr_it->second));
+            }
+            catch (const std::exception &) {
+                NIXL_WARN << "awsS3Client: invalid max_retries '" << mr_it->second
+                          << "', using default " << max_retries;
+            }
+        }
+    }
+    config.retryStrategy =
+        Aws::MakeShared<Aws::Client::DefaultRetryStrategy>("nixl-s3", max_retries);
 
     auto credentials_opt = nixl_s3_utils::createAWSCredentials(custom_params);
     bool use_virtual_addressing = nixl_s3_utils::getUseVirtualAddressing(custom_params);
     bucketName_ = Aws::String(nixl_s3_utils::getBucketName(custom_params));
 
-    if (credentials_opt.has_value())
+    if (credentials_opt.has_value()) {
         s3Client_ = std::make_unique<Aws::S3::S3Client>(
             credentials_opt.value(),
             config,
             Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::RequestDependent,
             use_virtual_addressing);
-    else
+    } else {
         s3Client_ = std::make_unique<Aws::S3::S3Client>(
             config,
             Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::RequestDependent,
             use_virtual_addressing);
+    }
 }
 
 void
