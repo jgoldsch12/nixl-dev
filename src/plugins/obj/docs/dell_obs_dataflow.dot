@@ -1,0 +1,68 @@
+/*
+ * NIXL OBJ plugin - Dell ObjectScale accelerated engine
+ * Runtime data flow: registerMem -> prepXfer -> postXfer -> checkXfer.
+ *
+ * Render: dot -Tpng dell_obs_dataflow.dot -o dell_obs_dataflow.png
+ */
+digraph DellObsDataflow {
+    rankdir=TB;
+    bgcolor="white";
+    compound=true;
+    label=<<b>NIXL OBJ Plugin &mdash; Dell ObjectScale Accelerated Engine (runtime data flow)</b>>;
+    labelloc="t";
+    fontsize=20;
+    fontname="Helvetica";
+    node [fontname="Helvetica", fontsize=11, shape=box, style="filled", fillcolor="#eef3fb"];
+    edge [fontname="Helvetica", fontsize=10];
+
+    /* actors as swimlane anchors */
+    app   [label="Application / NIXL Agent", fillcolor="#cfe0f7", shape=box, style="filled,bold"];
+
+    subgraph cluster_engine {
+        label="S3DellObsObjEngineImpl";
+        style="rounded,filled"; fillcolor="#eafbef"; color="#99cc99";
+
+        reg [label="registerMem()\nVRAM/DRAM: cuMemObjGetDescriptor(addr,len)\nOBJ_SEG: map devId -> object key", fillcolor="#c9f0d4"];
+        prep [label="prepXfer()\nvalidate (local DRAM/VRAM, remote OBJ_SEG)\nfor each desc: cuObjGet/cuObjPut(&ctx,...)\n=> RDMA descriptor string captured\nbuild nixlObsObjBackendReqH (reqs_)", fillcolor="#c9f0d4"];
+        post [label="postXfer()\nfor each req: create promise/future\ncast s3Client_ -> iDellS3RdmaClient\nget/putObjectRdmaAsync(key, addr, size, rdma_desc, cb)\nreturn NIXL_IN_PROG", fillcolor="#c9f0d4"];
+        chk [label="checkXfer()\nreqH->getOverallStatus()\npoll futures: IN_PROG / SUCCESS / err", fillcolor="#c9f0d4"];
+    }
+
+    subgraph cluster_cuobj {
+        label="cuObjClient (CUOBJ_PROTO_RDMA_DC_V1)";
+        style="rounded,filled"; fillcolor="#f2f2f2"; color="#aaaaaa";
+        cuobj [label="cuObjGet / cuObjPut\ninvokes obs_ops.get/.put callback\nobjectGet()/objectPut():\n  rctx->rdma_desc = infop->desc_str", fillcolor="#dddddd"];
+    }
+
+    subgraph cluster_client {
+        label="awsS3DellObsClient + AWS SDK";
+        style="rounded,filled"; fillcolor="#f6eafb"; color="#bb99cc";
+        cli [label="get/putObjectRdmaAsync()\nbuild S3 request:\n  Bucket/Key, x-rdma-info=rdma_desc\n  PUT: ContentLength=0\n  GET: Range bytes=off-(off+len-1)", fillcolor="#e4ccf0"];
+        sdk [label="AWS SDK S3Client\nPutObjectAsync / GetObjectAsync\n(on asioThreadPoolExecutor)\noutcome -> callback(success)", fillcolor="#e4ccf0"];
+    }
+
+    objscale [label="Dell ObjectScale\nS3 endpoint", shape=cylinder, fillcolor="#cdeccd", style="filled,bold"];
+
+    /* ---- control flow (numbered) ---- */
+    app  -> reg  [label="1. registerMem (VRAM/DRAM + OBJ keys)"];
+    reg  -> cuobj [label="1a. cuMemObjGetDescriptor", style=dotted];
+
+    app  -> prep [label="2. prepXfer"];
+    prep -> cuobj [label="2a. cuObjGet/Put(&ctx)"];
+    cuobj -> prep [label="2b. rdma_desc string", style=dashed];
+
+    app  -> post [label="3. postXfer"];
+    post -> cli  [label="3a. get/putObjectRdmaAsync"];
+    cli  -> sdk  [label="3b. request + x-rdma-info"];
+    sdk  -> objscale [label="3c. HTTPS control (CL=0 / Range)"];
+
+    /* ---- RDMA data path (out-of-band) ---- */
+    objscale -> app [label="RDMA data transfer\n(GPUDirect / RoCEv2 iCRC,\nbody is out-of-band)", color="#2266aa", penwidth=2.5, style=bold, constraint=false];
+
+    /* ---- completion ---- */
+    sdk  -> post [label="3d. callback -> promise.set_value", style=dashed];
+    app  -> chk  [label="4. checkXfer (poll)"];
+    chk  -> app  [label="4a. SUCCESS / IN_PROG / err", style=dashed];
+
+    {rank=same; cuobj; prep;}
+}

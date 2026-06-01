@@ -1,0 +1,118 @@
+/*
+ * NIXL OBJ plugin - Dell ObjectScale accelerated engine
+ * Static structure / class & layer hierarchy.
+ *
+ * Render: dot -Tpng dell_obs_structure.dot -o dell_obs_structure.png
+ */
+digraph DellObsStructure {
+    rankdir=TB;
+    bgcolor="white";
+    label=<<b>NIXL OBJ Plugin &mdash; Dell ObjectScale Accelerated Engine (static structure)</b>>;
+    labelloc="t";
+    fontsize=20;
+    fontname="Helvetica";
+    node [fontname="Helvetica", fontsize=11];
+    edge [fontname="Helvetica", fontsize=10];
+
+    /* ---------- NIXL core / plugin loader ---------- */
+    subgraph cluster_core {
+        label="NIXL core";
+        style="rounded,filled";
+        fillcolor="#eef3fb";
+        color="#99aabb";
+
+        nixlBackendEngine [shape=box, style="filled", fillcolor="#cfe0f7",
+            label="nixlBackendEngine\n(abstract backend API)"];
+        plugin [shape=box, style="filled", fillcolor="#cfe0f7",
+            label="nixl_plugin_init() / createStaticOBJPlugin()\nobj_plugin.cpp\nnixlBackendPluginCreator<nixlObjEngine>"];
+    }
+
+    /* ---------- Engine facade ---------- */
+    subgraph cluster_engine {
+        label="OBJ engine facade (obj_backend.*)";
+        style="rounded,filled";
+        fillcolor="#fff6e6";
+        color="#ccbbaa";
+
+        nixlObjEngine [shape=box, style="filled", fillcolor="#ffe6b3",
+            label="nixlObjEngine : nixlBackendEngine\n- holds unique_ptr<nixlObjEngineImpl> impl_\n- delegates register/prep/post/check/release"];
+        factory [shape=note, style="filled", fillcolor="#fff0cc",
+            label="createObjEngineImpl(init_params)\nselects impl by customParams:\n  Dell  -> S3DellObsObjEngineImpl\n  accel -> S3AccelObjEngineImpl\n  crt   -> S3CrtObjEngineImpl\n  else  -> DefaultObjEngineImpl"];
+        nixlObjEngineImpl [shape=box, style="filled", fillcolor="#ffe6b3",
+            label="nixlObjEngineImpl (abstract impl)\ngetSupportedMems / registerMem / deregisterMem\nqueryMem / prepXfer / postXfer / checkXfer / releaseReqH"];
+    }
+
+    /* ---------- Engine impl hierarchy ---------- */
+    subgraph cluster_impl {
+        label="Engine impl inheritance chain";
+        style="rounded,filled";
+        fillcolor="#eafbef";
+        color="#99cc99";
+
+        DefaultObjEngineImpl [shape=box, style="filled", fillcolor="#c9f0d4",
+            label="DefaultObjEngineImpl\n(s3/engine_impl.*)\nvanilla S3 GET/PUT\nmems: {OBJ_SEG, DRAM_SEG}"];
+        S3AccelObjEngineImpl [shape=box, style="filled", fillcolor="#c9f0d4",
+            label="S3AccelObjEngineImpl : DefaultObjEngineImpl\n(s3_accel/engine_impl.*)\nbase for accelerated vendors"];
+        S3DellObsObjEngineImpl [shape=box, style="filled,bold", fillcolor="#8fe0a8", penwidth=2,
+            label="S3DellObsObjEngineImpl : S3AccelObjEngineImpl\n(s3_accel/dell/engine_impl.*)\noverrides registerMem/deregisterMem/\nprepXfer/postXfer/checkXfer/releaseReqH\nmems: {OBJ_SEG, DRAM_SEG, VRAM_SEG}\nholds: s3Client_, cuClient_"];
+    }
+
+    /* ---------- Client hierarchy ---------- */
+    subgraph cluster_client {
+        label="S3 client inheritance chain";
+        style="rounded,filled";
+        fillcolor="#f6eafb";
+        color="#bb99cc";
+
+        iS3Client [shape=box, style="filled", fillcolor="#e4ccf0",
+            label="iS3Client (abstract)\nput/getObjectAsync\ncheckObjectExistsAsync"];
+        awsS3Client [shape=box, style="filled", fillcolor="#e4ccf0",
+            label="awsS3Client (s3/client.*)\nvanilla AWS SDK S3"];
+        awsS3AccelClient [shape=box, style="filled", fillcolor="#e4ccf0",
+            label="awsS3AccelClient : awsS3Client\n(s3_accel/client.*)"];
+        iDellS3RdmaClient [shape=box, style="filled", fillcolor="#f0d4e0",
+            label="iDellS3RdmaClient (interface)\n(s3_accel/dell/rdma_interface.h)\nput/getObjectRdmaAsync(...rdma_desc...)"];
+        awsS3DellObsClient [shape=box, style="filled,bold", fillcolor="#e0a8d0", penwidth=2,
+            label="awsS3DellObsClient\n: awsS3AccelClient, iDellS3RdmaClient\n(s3_accel/dell/client.*)\nadds x-rdma-info header, ContentLength=0\nRange header for GET"];
+    }
+
+    /* ---------- External deps ---------- */
+    subgraph cluster_ext {
+        label="External dependencies";
+        style="rounded,filled";
+        fillcolor="#f2f2f2";
+        color="#aaaaaa";
+
+        cuObjClient [shape=box, style="filled", fillcolor="#dddddd",
+            label="cuObjClient (cuobjclient-13.1)\nCUOBJ_PROTO_RDMA_DC_V1\ncuMemObjGetDescriptor / cuObjGet / cuObjPut"];
+        awsSdk [shape=box, style="filled", fillcolor="#dddddd",
+            label="AWS C++ SDK (S3Client)\nPutObjectAsync / GetObjectAsync"];
+        executor [shape=box, style="filled", fillcolor="#dddddd",
+            label="asioThreadPoolExecutor\n(obj_executor.h)\nasio::thread_pool"];
+        objscale [shape=cylinder, style="filled", fillcolor="#cdeccd",
+            label="Dell ObjectScale\nS3-compatible storage\n(RoCEv2 / RDMA-capable)"];
+    }
+
+    /* ---------- relationships ---------- */
+    plugin -> nixlObjEngine [label="instantiates"];
+    nixlObjEngine -> nixlBackendEngine [arrowhead=onormal, label="is-a", style=dashed];
+    nixlObjEngine -> factory [style=dotted, label="ctor calls"];
+    factory -> S3DellObsObjEngineImpl [label="creates (Dell requested)", color="#22aa77"];
+    nixlObjEngine -> nixlObjEngineImpl [label="owns impl_", arrowhead=diamond];
+
+    S3DellObsObjEngineImpl -> S3AccelObjEngineImpl [arrowhead=onormal, label="is-a"];
+    S3AccelObjEngineImpl -> DefaultObjEngineImpl [arrowhead=onormal, label="is-a"];
+    DefaultObjEngineImpl -> nixlObjEngineImpl [arrowhead=onormal, style=dashed, label="implements"];
+
+    awsS3DellObsClient -> awsS3AccelClient [arrowhead=onormal, label="is-a"];
+    awsS3AccelClient -> awsS3Client [arrowhead=onormal, label="is-a"];
+    awsS3Client -> iS3Client [arrowhead=onormal, style=dashed, label="implements"];
+    awsS3DellObsClient -> iDellS3RdmaClient [arrowhead=onormal, style=dashed, label="implements"];
+
+    S3DellObsObjEngineImpl -> awsS3DellObsClient [label="s3Client_", arrowhead=diamond, color="#aa2266"];
+    S3DellObsObjEngineImpl -> cuObjClient [label="cuClient_", arrowhead=diamond, color="#aa2266"];
+    awsS3DellObsClient -> awsSdk [label="wraps"];
+    awsS3DellObsClient -> executor [label="async via", style=dotted];
+    awsSdk -> objscale [label="HTTPS + x-rdma-info"];
+    cuObjClient -> objscale [label="RDMA data path", color="#2266aa", penwidth=2];
+}

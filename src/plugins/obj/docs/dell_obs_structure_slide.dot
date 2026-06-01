@@ -1,0 +1,41 @@
+/*
+ * NIXL OBJ plugin - Dell ObjectScale accelerated engine
+ * Simplified slide version of the static structure.
+ *
+ * Render: dot -Tpng dell_obs_structure_slide.dot -o dell_obs_structure_slide.png
+ */
+digraph DellObsSlide {
+    rankdir=TB;
+    bgcolor="white";
+    label=<<b>NIXL OBJ Plugin &mdash; Dell ObjectScale Accelerated Engine</b>>;
+    labelloc="t";
+    fontsize=30;
+    fontname="Helvetica";
+    nodesep=0.6;
+    ranksep=0.8;
+
+    node [fontname="Helvetica", fontsize=20, shape=box,
+          style="filled,rounded", penwidth=2, margin="0.25,0.18"];
+    edge [fontname="Helvetica", fontsize=17, penwidth=2];
+
+    app    [label="NIXL Agent / Application", fillcolor="#cfe0f7", color="#33aa66"];
+    engine [label="nixlObjEngine\n(OBJ plugin)", fillcolor="#ffe6b3", color="#cba000"];
+    dell   [label="S3DellObsObjEngineImpl\nDell ObjectScale engine", fillcolor="#8fe0a8", color="#229955", penwidth=3];
+
+    s3cli  [label="awsS3DellObsClient\n+ AWS S3 SDK", fillcolor="#e0a8d0", color="#aa2266"];
+    cuobj  [label="cuObjClient\n(cuObject RDMA)", fillcolor="#cccccc", color="#888888"];
+
+    storage [label="Dell ObjectScale\nS3 storage", shape=cylinder, fillcolor="#cdeccd",
+             color="#229955", penwidth=3, style="filled"];
+
+    app    -> engine [label="  register / prep / post / check"];
+    engine -> dell   [label="  delegates"];
+
+    dell -> s3cli [label="  control:\l  x-rdma-info header\l"];
+    dell -> cuobj [label="  RDMA setup:\l  cuObjGet / cuObjPut\l"];
+
+    s3cli -> storage [label="  HTTP request\l  (empty body)\l"];
+    cuobj -> storage [label="  RDMA data path\l  (GPUDirect)\l", color="#2266aa", fontcolor="#2266aa", penwidth=3.5];
+
+    {rank=same; s3cli; cuobj;}
+}
